@@ -1,131 +1,160 @@
 const express = require('express');
 const cors = require('cors');
-const bodyParser = require('body-parser');
+const path = require('path');
+const fs = require('fs');
+require('dotenv').config();
 const { Pool } = require('pg');
 const OpenAI = require('openai');
-const fs = require('fs');
-const path = require('path');
 
-const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-
-// OpenAI setup
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-// PostgreSQL setup
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL
-});
-
-// Get table name from repository name
-const repoName = path.basename(process.cwd());
-const tableName = `todos_${repoName}`.replace(/[^a-zA-Z0-9_]/g, '_');
-
-// Initialize database
-async function initDB() {
+// Load OpenAI API key
+let OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+if (!OPENAI_API_KEY) {
   try {
-    await pool.query(`
-      CREATE TABLE IF NOT EXISTS ${tableName} (
-        id SERIAL PRIMARY KEY,
-        text TEXT NOT NULL,
-        completed BOOLEAN DEFAULT false,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-    console.log(`Database table ${tableName} initialized`);
-  } catch (err) {
-    console.error('Database initialization error:', err);
+    const config = JSON.parse(fs.readFileSync('C:\\dev\\openai-key.json', 'utf8'));
+    OPENAI_API_KEY = config.OPENAI_API_KEY;
+  } catch (error) {
+    console.log('OpenAI key not found');
   }
 }
 
-initDB();
+const openai = OPENAI_API_KEY ? new OpenAI({ apiKey: OPENAI_API_KEY }) : null;
 
-// Get todos
+// Dynamic table names from repo name
+const APP_NAME = path.basename(process.cwd()).replace(/[^a-zA-Z0-9]/g, '_').toLowerCase();
+const TODO_TABLE = `${APP_NAME}_todo_items`;
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+app.use(express.static('build'));
+
+// Initialize database
+async function initDatabase() {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS ${TODO_TABLE} (
+        id SERIAL PRIMARY KEY,
+        description TEXT NOT NULL,
+        completed BOOLEAN DEFAULT FALSE,
+        created TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    console.log('✅ Database initialized');
+  } catch (error) {
+    console.error('❌ Database error:', error);
+  }
+}
+
+// Routes
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', table: TODO_TABLE });
+});
+
 app.get('/api/todos', async (req, res) => {
   try {
-    const result = await pool.query(`SELECT * FROM ${tableName} ORDER BY id DESC`);
+    const result = await pool.query(`SELECT * FROM ${TODO_TABLE} ORDER BY created DESC`);
     res.json(result.rows);
-  } catch (err) {
-    console.error('Error fetching todos:', err);
-    res.status(500).json({ error: 'Failed to fetch todos' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Add todo with AI processing
 app.post('/api/todos', async (req, res) => {
   try {
-    let { text } = req.body;
-    
-    // Read prompt from file
-    const promptPath = path.join(__dirname, 'prompt.txt');
-    let systemPrompt = 'Process the user input into a todo item.';
-    
-    try {
-      systemPrompt = fs.readFileSync(promptPath, 'utf8').trim();
-    } catch (err) {
-      console.log('Using default prompt');
-    }
-    
-    // Process with OpenAI
-    const response = await openai.chat.completions.create({
-      model: 'gpt-4',
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: text }
-      ],
-      max_tokens: 100
-    });
-    
-    const processedText = response.choices[0].message.content.trim();
-    
-    // Save to database
+    const { description } = req.body;
     const result = await pool.query(
-      `INSERT INTO ${tableName} (text) VALUES ($1) RETURNING *`,
-      [processedText]
+      `INSERT INTO ${TODO_TABLE} (description) VALUES ($1) RETURNING *`,
+      [description]
     );
-    
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error('Error adding todo:', err);
-    res.status(500).json({ error: 'Failed to add todo' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Toggle todo completion
-app.put('/api/todos/:id', async (req, res) => {
+app.patch('/api/todos/:id', async (req, res) => {
   try {
     const { id } = req.params;
     const { completed } = req.body;
-    
     const result = await pool.query(
-      `UPDATE ${tableName} SET completed = $1 WHERE id = $2 RETURNING *`,
+      `UPDATE ${TODO_TABLE} SET completed = $1 WHERE id = $2 RETURNING *`,
       [completed, id]
     );
-    
     res.json(result.rows[0]);
-  } catch (err) {
-    console.error('Error updating todo:', err);
-    res.status(500).json({ error: 'Failed to update todo' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-// Delete todo
 app.delete('/api/todos/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    await pool.query(`DELETE FROM ${tableName} WHERE id = $1`, [id]);
+    await pool.query(`DELETE FROM ${TODO_TABLE} WHERE id = $1`, [id]);
     res.json({ success: true });
-  } catch (err) {
-    console.error('Error deleting todo:', err);
-    res.status(500).json({ error: 'Failed to delete todo' });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
+// OpenAI chat endpoint
+app.post('/api/chat', async (req, res) => {
+  if (!openai) {
+    return res.status(500).json({ error: 'OpenAI not configured' });
+  }
+
+  try {
+    const { message } = req.body;
+    
+    // Read prompt from file
+    let systemPrompt = 'Summarize the user input like Shakespeare. Return a single line for a todo list.';
+    try {
+      systemPrompt = fs.readFileSync('backend/prompt.txt', 'utf8').trim();
+    } catch (error) {
+      console.log('Using default prompt (prompt.txt not found)');
+    }
+    
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4',
+      messages: [
+        {
+          role: 'system',
+          content: systemPrompt
+        },
+        { role: 'user', content: message }
+      ],
+      max_tokens: 100,
+      temperature: 0.7
+    });
+
+    const description = completion.choices[0].message.content.trim();
+    
+    // Add to todo list
+    const result = await pool.query(
+      `INSERT INTO ${TODO_TABLE} (description) VALUES ($1) RETURNING *`,
+      [description]
+    );
+
+    res.json({ 
+      aiResponse: description,
+      todo: result.rows[0] 
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'build', 'index.html'));
+});
+
+initDatabase();
+
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log(`Using table: ${tableName}`);
 });

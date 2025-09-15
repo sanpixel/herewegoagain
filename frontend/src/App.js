@@ -2,6 +2,7 @@ import React from 'react';
 import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
 import Auth from './components/Auth';
 import AuthCallback from './components/AuthCallback';
+import TodoApp from './components/TodoApp';
 import './App.css';
 
 function App() {
@@ -32,7 +33,11 @@ function App() {
           <Routes>
             <Route path="/" element={<Auth />} />
             <Route path="/auth/callback" element={<AuthCallback />} />
+            <Route path="/todos" element={<TodoApp />} />
           </Routes>
+          <div style={{textAlign: 'center', margin: '20px'}}>
+            <a href="/todos">Todo Page</a>
+          </div>
           <div style={{fontSize: '10px', textAlign: 'center', margin: '20px'}}>
             <a href="/files" target="_blank" style={{color: '#61dafb', textDecoration: 'none'}}>
               Browse container files
